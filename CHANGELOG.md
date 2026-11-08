@@ -9,7 +9,7 @@ Each entry says whether the release **migrates stored data** and what to do when
 
 ## [Unreleased]
 
-## [0.9.0-layers.1] - 2026-11-08
+## [0.9.0-layers.2] - 2026-11-08
 
 ### Upgrading
 
