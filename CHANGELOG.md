@@ -9,6 +9,8 @@ Each entry says whether the release **migrates stored data** and what to do when
 
 ## [Unreleased]
 
+## [0.9.0-layers.1] - 2026-11-08
+
 ### Upgrading
 
 Nothing changes until you add a layer. The stored data is migrated from 6.1 to 6.2, which only
