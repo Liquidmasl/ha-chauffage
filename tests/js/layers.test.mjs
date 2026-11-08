@@ -43,23 +43,28 @@ describe('the layers that apply now, over the schedule', () => {
     ]);
   });
 
-  test('each layer of a stack is one tier higher, counting only the layers drawn on that day', () => {
-    const tiers = (card) => $$(card, '.bar[data-climate="climate.salon"][data-day="0"] .layer-block').map((el) => el.dataset.tier);
-    const data = withLayers({ applying: ['sun', 'occupied'] });
-    assert.deepEqual(tiers(createCard(fakeHass({ data }))), ['0', '1']);
-    cleanup();
-    data.layer_weeks['climate.salon'].occupied = Array(7).fill([['00:00', null]]);
-    assert.deepEqual(tiers(createCard(fakeHass({ data }))), ['0']);
+  const lanes = (card) => $$(card, '.bar[data-climate="climate.salon"][data-day="0"] .layer-block').map((el) => [el.dataset.layer, el.dataset.lane]);
+  const depth = (card) => card.shadowRoot.querySelector('.bar[data-climate="climate.salon"][data-day="0"]').style.getPropertyValue('--count');
+
+  test('blocks that collide take separate lanes, the one that wins at the bottom', () => {
+    const card = createCard(fakeHass({ data: withLayers({ applying: ['sun', 'occupied'] }) }));
+    assert.deepEqual(lanes(card), [['occupied', '1'], ['sun', '0']]);
+    assert.equal(depth(card), '2');
   });
 
-  test('a layer block is slimmer on each tier and stays inside its day', () => {
+  test('blocks that do not collide share a lane, so the day stays slim', () => {
+    const data = withLayers({ applying: ['sun', 'occupied'] });
+    data.layer_weeks['climate.salon'].occupied = Array(7).fill([['00:00', null], ['15:00', 'comfort'], ['17:00', null]]);
+    const card = createCard(fakeHass({ data }));
+    assert.deepEqual(lanes(card), [['occupied', '0'], ['sun', '0']]);
+    assert.equal(depth(card), '1');
+  });
+
+  test('every block sits on the bottom of its day, those that lose a collision taller behind the winner', () => {
     const card = createCard(fakeHass({ data: withLayers() }));
     const css = card.shadowRoot.querySelector('style').textContent;
-    assert.match(css, /\.layer-block \{[^}]*bottom:0/);
-    // Each tier shows a strip tall enough for its name, the name at the top of the block
-    assert.match(css, /\.bar \{ min-height:calc\(var\(--count, 0\) \* 14px/);
-    assert.match(css, /\.layer-block \{[^}]*max\(14px,[^}]*align-items:flex-start/);
-    assert.match(css, /\.layer-block \{[^}]*height:calc\(\(var\(--count\) - var\(--tier\)\) \* max\(\d+px,/);
+    assert.match(css, /\.bar \{ min-height:calc\(var\(--count, 0\) \* 5px \+ 17px\)/);
+    assert.match(css, /\.layer-block \{[^}]*bottom:0;[^}]*height:calc\(14px \+ var\(--lane\) \* 5px\)/);
   });
 
   test('a layer that does not apply now is not drawn', () => {
@@ -256,6 +261,38 @@ describe('a layer\'s blocks behave as the slots of the schedule', () => {
     assert.ok(end.isConnected);
     mouse(end, 'pointerup', 18 * 60);
     assert.equal(card._layerBlocks('climate.salon', 'occupied', 0)[0].end, 18 * 60);
+  });
+
+  describe('the line of the current time', () => {
+    // The row of today (the only one drawing the line), opened
+    const openToday = (hass) => {
+      const card = createCard(hass, { show: ['climate.salon'] });
+      const today = $(card, '.bar[data-climate="climate.salon"] .now').parentElement;
+      today.querySelector('.seg').click();
+      return card;
+    };
+
+    test('goes through the layers of an open row', () => {
+      const card = openToday(fakeHass({ data: withLayers() }));
+      assert.equal(card.shadowRoot.querySelectorAll('.lbar').length, 2);
+      assert.equal(card.shadowRoot.querySelectorAll('.lbar .now').length, 2);
+    });
+
+    test('is not drawn for a paused thermostat', () => {
+      const data = withLayers();
+      data.thermostats['climate.salon'].paused = true;
+      const card = createCard(fakeHass({ data }), { show: ['climate.salon'] });
+      card.shadowRoot.querySelector('.bar[data-climate="climate.salon"] .seg').click();
+      assert.equal(card.shadowRoot.querySelectorAll('.lbar .now').length, 0);
+    });
+
+    test('runs from the first row to the last, its ends only at the ends of the whole day', () => {
+      const css = openToday(fakeHass({ data: withLayers() })).shadowRoot.querySelector('style').textContent;
+      assert.match(css, /\.opened > \.sub \.now \{ top:-10px; bottom:-10px; \}/);
+      assert.match(css, /\.subs > \.opened > \.sub \.now::before, \.subs > \.opened > \.sub \.now::after \{ content:none; \}/);
+      assert.match(css, /\.subs > \.opened:first-child > \.sub:first-child \.now \{ top:-3px; \}/);
+      assert.match(css, /\.subs > \.opened:last-child > \.sub:last-child \.now \{ bottom:-3px; \}/);
+    });
   });
 
   test('a click elsewhere closes its popover', () => {

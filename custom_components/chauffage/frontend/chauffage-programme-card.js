@@ -788,16 +788,34 @@ function applyingStack(src, schedule, blocksOf) {
 // The tooltip of a layer's title: its name, and when it applies
 const layerTitle = (layer) => (layer.condition ? `${layer.name}\n${layer.condition}` : layer.name);
 
-// What a day needs to know to make room for a stack (.bar, .layer-block)
-const stackStyle = (stack) => (stack.length ? ` style="--count:${stack.length}"` : '');
+// The lane of each block of a stack: the one that wins at the bottom, and a new lane only where
+// blocks collide in time. { laneOf: Map(block -> lane), depth: how many lanes }
+function stackLanes(stack) {
+  const laneOf = new Map();
+  const lanes = [];
+  for (const { blocks } of [...stack].reverse()) {
+    for (const block of blocks) {
+      let lane = lanes.findIndex((taken) => !taken.some((b) => block.start < b.end && b.start < block.end));
+      if (lane < 0) lane = lanes.push([]) - 1;
+      lanes[lane].push(block);
+      laneOf.set(block, lane);
+    }
+  }
+  return { laneOf, depth: lanes.length };
+}
 
-// A stack drawn over a day. One tier per layer: the top one is the last, in front, and the
-// slimmest (.layer-block). `presetOf(id)`: { name, color }
+// What a day needs to know to make room for a stack (.bar)
+const stackStyle = (stack) => (stack.length ? ` style="--count:${stackLanes(stack).depth}"` : '');
+
+// A stack drawn over a day, each block in its lane (.layer-block). `presetOf(id)`: { name, color }
 function stackHtml(stack, presetOf, loc) {
-  return stack.map(({ layer, blocks, state }, tier) => blocks.map(({ start, end, preset }) => {
+  const { laneOf } = stackLanes(stack);
+  return stack.map(({ layer, blocks, state }) => blocks.map((block) => {
+    const { start, end, preset } = block;
+    const lane = laneOf.get(block);
     const p = presetOf(preset);
     const title = `${layer.name} · ${loc.time(start)} → ${loc.time(end)} · ${p.name}`;
-    return `<div class="layer-block${state ? ` ${state}` : ''}" data-layer="${esc(layer.id)}" data-preset="${esc(preset)}" data-tier="${tier}" style="--count:${stack.length};--tier:${tier};left:${pct(start)}%;width:${pct(end - start)}%;background:${p.color}" title="${esc(title)}"><span>${esc(layer.name)}</span></div>`;
+    return `<div class="layer-block${state ? ` ${state}` : ''}" data-layer="${esc(layer.id)}" data-preset="${esc(preset)}" data-lane="${lane}" style="--lane:${lane};left:${pct(start)}%;width:${pct(end - start)}%;background:${p.color}" title="${esc(title)}"><span>${esc(layer.name)}</span></div>`;
   }).join('')).join('');
 }
 
@@ -2855,7 +2873,7 @@ class ChauffageProgrammeCard extends HTMLElement {
       .join('');
     const unscheduled = this._unscheduled(climate) ? ' unscheduled' : '';
     const paused = this._source().paused(climate);
-    const now = showNow && !paused ? `<div class="now" style="left:${pct(nowMin())}%"></div>` : '';
+    const now = this._nowHtml(climate, showNow);
     // The day copied last stands out, in whatever card it was copied (the copy is shared)
     const clip = this._clip;
     const cs = clip && clip.src;
@@ -2870,9 +2888,14 @@ class ChauffageProgrammeCard extends HTMLElement {
     return `<div class="bar${isSrc ? ' clipsrc' : ''}${zoom}${paused ? ' paused' : ''}${unscheduled}${locked}"${stackStyle(stack)} data-climate="${esc(climate)}" data-day="${d}">${segHtml}${handles}${layers}${history}${this._overrideHtml(climate, days)}${now}</div>`;
   }
 
+  // The line of the current time, on a row of today (not for a paused thermostat)
+  _nowHtml(climate, showNow) {
+    return showNow && !this._source().paused(climate) ? `<div class="now" style="left:${pct(nowMin())}%"></div>` : '';
+  }
+
   // The rows of an open row's layers: one per layer of the schedule, top first, its blocks
   // editable
-  _layerRowsHtml(climate, d) {
+  _layerRowsHtml(climate, d, showNow) {
     const src = this._source();
     const active = this._schedule === this._activeSchedule();
     const applying = src.layersApplying();
@@ -2890,7 +2913,7 @@ class ChauffageProgrammeCard extends HTMLElement {
       }).join('');
       return `<div class="sub layer-sub"><span class="tree"></span>
         <div class="name lname ${state}" title="${esc(layerTitle(layer))}">${esc(layer.name)}${this._nameSizer()}</div>
-        <div class="lbar" data-climate="${esc(climate)}" data-day="${d}" data-layer="${esc(layer.id)}">${blockHtml}</div>
+        <div class="lbar" data-climate="${esc(climate)}" data-day="${d}" data-layer="${esc(layer.id)}">${blockHtml}${this._nowHtml(climate, showNow)}</div>
         <span></span></div>`;
     }).join('');
     return rows;
@@ -2945,7 +2968,7 @@ class ChauffageProgrammeCard extends HTMLElement {
           ${this._barHtml(climate, segs, days, showNow)}
           <button class="ibtn${open ? ' open' : ''}" data-act="menu" data-climate="${esc(climate)}" data-day="${d}" title="${esc(this._loc.t('copyPaste'))}">${ICON_MORE}</button>
         </div>`;
-        return opened ? `<div class="opened">${sub}${this._layerRowsHtml(climate, d)}</div>` : sub;
+        return opened ? `<div class="opened">${sub}${this._layerRowsHtml(climate, d, showNow)}</div>` : sub;
       })
       .join('');
     // Today stands out, except in a week of an inactive schedule stacked under the active one's
@@ -5122,15 +5145,16 @@ const TIME_FIELD_STYLE = `
 `;
 
 const LAYER_BLOCK_STYLE = `
-  /* A layer that applies now, only shown, edited elsewhere. On the bottom edge of its day, each
-     tier a step slimmer than the one under it, so that all of them show; a day with many grows
-     to hold them, leaving a strip of the schedule above */
-  .bar { min-height:calc(var(--count, 0) * 14px + 8px); }
-  .layer-block { position:absolute; bottom:0; height:calc((var(--count) - var(--tier)) * max(14px, 70% / var(--count)));
+  /* A layer that applies now, only shown, edited elsewhere. Every block sits on the bottom edge of
+     its day. Where blocks collide, the one that wins is in front, and each one behind it is a
+     step taller, so that it peeks out above. A day grows a little to hold them, leaving a strip
+     of the schedule on top */
+  .bar { min-height:calc(var(--count, 0) * 5px + 17px); }
+  .layer-block { position:absolute; bottom:0; height:calc(14px + var(--lane) * 5px);
     box-sizing:border-box; overflow:hidden;
-    padding:1px 5px 0; border:1px solid rgba(255,255,255,.85); box-shadow:0 1px 2px rgba(0,0,0,.25);
+    padding:0 5px; border:1px solid rgba(255,255,255,.85); box-shadow:0 1px 2px rgba(0,0,0,.25);
     color:#fff; font-size:10.5px; line-height:1; white-space:nowrap;
-    display:flex; align-items:flex-start; text-shadow:0 1px 1px rgba(0,0,0,.3); }
+    display:flex; align-items:center; text-shadow:0 1px 1px rgba(0,0,0,.3); }
   .layer-block span { overflow:hidden; text-overflow:ellipsis; }
 `;
 
@@ -5331,6 +5355,13 @@ const STYLE = `
   .chev.open { transform:none; color:var(--primary-color); }
   .chev:focus-visible { outline:2px solid var(--primary-color); }
   .opened { display:flex; flex-direction:column; gap:4px; }
+  /* The line of the current time goes through an open row; its ends stay at the ends of the day */
+  .opened > .sub .now { top:-10px; bottom:-10px; }
+  .subs > .opened > .sub .now::before, .subs > .opened > .sub .now::after { content:none; }
+  .subs > .opened:first-child > .sub:first-child .now { top:-3px; }
+  .subs > .opened:last-child > .sub:last-child .now { bottom:-3px; }
+  .subs > .opened:first-child > .sub:first-child .now::before { content:''; }
+  .subs > .opened:last-child > .sub:last-child .now::after { content:''; }
   .opened > .sub:first-child .name { font-weight:600; color:var(--primary-text-color); }
   .layer-sub .tree { align-self:stretch; justify-self:center; width:2px; margin:-4px 0; background:var(--primary-color); opacity:.5; }
   .lname { font-size:.72em; padding-left:6px; text-align:left; }
